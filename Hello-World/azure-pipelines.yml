@@ -1,0 +1,108 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  pythonVersion: '3.11'
+  azureServiceConnection: 'genesis-devops-training-spn-001'
+  webAppName: 'app-genesis-terraform-01'
+  artifactName: 'python-webapp'
+
+stages:
+- stage: Build_Test
+  displayName: Build and test
+  jobs:
+  - job: Build
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: UsePythonVersion@0
+      displayName: Use Python $(pythonVersion)
+      inputs:
+        versionSpec: '$(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+      displayName: Install dependencies
+
+    # - script: pytest -q
+    #   displayName: Run tests and build
+
+    - task: CopyFiles@2
+      displayName: Stage deployment files
+      inputs:
+        SourceFolder: '$(Build.SourcesDirectory)'
+        Contents: |
+          app.py
+          requirements.txt
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/app'
+        CleanTargetFolder: true
+
+    - task: ArchiveFiles@2
+      displayName: Create deployment ZIP
+      inputs:
+        rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/app'
+        includeRootFolder: false
+        archiveType: zip
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+        replaceExistingArchive: true
+
+    - task: PublishPipelineArtifact@1
+      displayName: Publish artifact
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+        artifact: '$(artifactName)'
+
+- stage: Deploy
+  displayName: Deploy to Azure App Service
+  dependsOn: Build_Test
+  condition: succeeded()
+  jobs:
+  - deployment: DeployWebApp
+    displayName: Deploy Python web app
+    environment: 'development'
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: '$(artifactName)'
+
+          - task: AzureAppServiceSettings@1
+            displayName: Enable App Service build automation
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              appName: '$(webAppName)'
+              resourceGroupName: 'rg-d-app-genesis-cloudtraining-001'
+              appSettings: |
+                [
+                  {
+                    "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+                    "value": "true",
+                    "slotSetting": false
+                  }
+                ]
+              generalSettings: |
+                [
+                  {
+                    "linuxFxVersion": "PYTHON|3.11"
+                  }
+                ]
+
+          - task: AzureWebApp@1
+            displayName: Deploy to Linux App Service
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              appType: webAppLinux
+              appName: '$(webAppName)'
+              package: '$(Pipeline.Workspace)/$(artifactName)/$(Build.BuildId).zip'
+              startUpCommand: 'gunicorn --bind=0.0.0.0:8000 --timeout 600 app:app'
